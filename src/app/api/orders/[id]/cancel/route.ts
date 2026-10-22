@@ -1,0 +1,91 @@
+import mongoose from "mongoose";
+import { NextRequest, NextResponse } from "next/server";
+import { connectDB } from "@/lib/mongodb";
+import { Order } from "@/models/Order";
+import { deleteFile } from "@/lib/storage";
+import { isRazorpayConfigured, refundRazorpayPayment } from "@/lib/razorpay";
+import { rateLimit, getClientIp } from "@/lib/rateLimit";
+
+export const runtime = "nodejs";
+
+// Client shows a 30s countdown; the server allows a few extra seconds as a
+// buffer for network latency so a cancel click right at 30s doesn't fail.
+const CANCEL_WINDOW_MS = 35 * 1000;
+
+/**
+ * POST /api/orders/:id/cancel
+ * Lets a customer cancel their own order (e.g. wrong file selected) within
+ * a short window right after placing it. Only allowed while the order is
+ * still "queued" — once it starts printing, it's too late to pull back.
+ * If it was paid online, a refund is attempted automatically via Razorpay.
+ */
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { ok } = rateLimit(`cancel-order:${getClientIp(req)}`, 20, 5 * 60 * 1000);
+  if (!ok) {
+    return NextResponse.json({ error: "Too many requests. Please wait a moment." }, { status: 429 });
+  }
+
+  const { id } = await params;
+
+  try {
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Order not found" }, { status: 404 });
+    }
+    await connectDB();
+    const order = await Order.findById(id);
+
+    if (!order) {
+      return NextResponse.json({ error: "Order not found" }, { status: 404 });
+    }
+
+    if (order.printStatus !== "queued") {
+      return NextResponse.json(
+        { error: "This order can no longer be cancelled — it's already being processed." },
+        { status: 409 }
+      );
+    }
+
+    const ageMs = Date.now() - order.createdAt.getTime();
+    if (ageMs > CANCEL_WINDOW_MS) {
+      return NextResponse.json({ error: "The cancellation window has passed for this order." }, { status: 409 });
+    }
+
+    // Cancel FIRST, atomically: if the agent claimed the order (queued ->
+    // printing) since our check above, this matches nothing and we refuse —
+    // so we never refund money for an order that is already printing.
+    const cancelled = await Order.findOneAndUpdate(
+      { _id: id, printStatus: "queued" },
+      { $set: { printStatus: "cancelled", cancelledAt: new Date() } },
+      { new: true }
+    );
+    if (!cancelled) {
+      return NextResponse.json(
+        { error: "This order can no longer be cancelled — it's already being processed." },
+        { status: 409 }
+      );
+    }
+
+    let refundIssued = false;
+    if (order.paymentMethod === "online" && order.paymentStatus === "paid" && order.razorpayPaymentId && isRazorpayConfigured()) {
+      try {
+        await refundRazorpayPayment(order.razorpayPaymentId);
+        refundIssued = true;
+        cancelled.paymentStatus = "refunded";
+        await cancelled.save();
+      } catch (err) {
+        // Don't undo the cancellation on a refund hiccup — the order still
+        // shouldn't print. Surface this so the shop can follow up manually.
+        console.error(`Refund failed for order ${order.token}:`, err);
+      }
+    }
+
+    if (order.fileKey) {
+      deleteFile(order.fileKey).catch(() => {});
+    }
+
+    return NextResponse.json({ order: cancelled, refundIssued });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to cancel order";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
