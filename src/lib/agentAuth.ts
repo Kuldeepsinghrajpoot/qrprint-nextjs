@@ -7,7 +7,6 @@ import crypto from "crypto";
  * than the cookie-based session used by the human dashboard — the agent
  * is a background service with no browser session.
  */
-
 export function verifyAgentKey(req: NextRequest): boolean {
   const key = req.headers.get("x-agent-key")?.trim();
   const expected = process.env.AGENT_API_KEY?.trim();

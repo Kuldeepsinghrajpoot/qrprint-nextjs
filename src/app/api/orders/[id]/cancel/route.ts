@@ -5,12 +5,10 @@ import { Order } from "@/models/Order";
 import { deleteFile } from "@/lib/storage";
 import { isRazorpayConfigured, refundRazorpayPayment } from "@/lib/razorpay";
 import { rateLimit, getClientIp } from "@/lib/rateLimit";
+import { CANCEL_WINDOW_MS } from "@/lib/orderTiming";
 
 export const runtime = "nodejs";
 
-// Client shows a 30s countdown; the server allows a few extra seconds as a
-// buffer for network latency so a cancel click right at 30s doesn't fail.
-const CANCEL_WINDOW_MS = 35 * 1000;
 
 /**
  * POST /api/orders/:id/cancel

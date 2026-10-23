@@ -50,7 +50,14 @@ export async function GET() {
   return NextResponse.json(
     printers.map((pr) => {
       const s = byPrinter.get(String(pr._id));
-      return { ...pr.toObject(), ordersPrintedToday: s?.orders ?? 0, pagesPrintedToday: s?.pages ?? 0 };
+      // If the Print Agent has gone silent (PC off / agent closed), "online" is stale — show offline.
+      const silent = pr.status === "online" && pr.lastSeenAt && now.getTime() - new Date(pr.lastSeenAt).getTime() > 2 * 60 * 1000;
+      return {
+        ...pr.toObject(),
+        ...(silent ? { status: "offline" } : {}),
+        ordersPrintedToday: s?.orders ?? 0,
+        pagesPrintedToday: s?.pages ?? 0,
+      };
     })
   );
 }

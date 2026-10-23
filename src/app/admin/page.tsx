@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { OrderDTO, PrinterDTO, PricingConfigDTO } from "@/types/order";
 import FluentIcon from "@/components/lexical/FluentIcon";
+import { CANCEL_WINDOW_MS } from "@/lib/orderTiming";
 import { Alert, Avatar, Button, Card, Chip, GRADIENTS, PageHero, StatCard, Switch, type Tone } from "@/components/lexical/ui";
 
 const POLL_INTERVAL_MS = 3000;
@@ -281,6 +282,19 @@ export default function AdminQueuePage() {
   );
 }
 
+/** "On hold" countdown: the customer can still cancel, so the order isn't sent to the printer yet. */
+function HoldChip({ createdAt }: { createdAt: string }) {
+  const [, tick] = useState(0);
+  const left = Math.ceil((new Date(createdAt).getTime() + CANCEL_WINDOW_MS - Date.now()) / 1000);
+  useEffect(() => {
+    if (left <= 0) return;
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [left > 0]); // eslint-disable-line react-hooks/exhaustive-deps -- only (re)start while the hold is active
+  if (left <= 0) return null;
+  return <Chip color="info">⏳ On hold — customer can still cancel · prints in {left}s</Chip>;
+}
+
 function OrderCard({
   order,
   printers,
@@ -344,6 +358,7 @@ function OrderCard({
               {order.paymentStatus === "pending" && <Chip color="warning">Cash Pending</Chip>}
               {order.paymentStatus === "paid" && <Chip color="success">Paid</Chip>}
               {order.paymentStatus === "refunded" && <Chip color="warning">Refunded</Chip>}
+              {order.printStatus === "queued" && order.paymentStatus !== "pending" && <HoldChip createdAt={order.createdAt} />}
               {order.printStatus === "printing" && <Chip color="info">Printing…</Chip>}
               {order.printStatus === "ready" && <Chip color="success">Ready ✅</Chip>}
               {order.printStatus === "collected" && <Chip color="success">Collected</Chip>}
@@ -383,6 +398,11 @@ function OrderCard({
               </Button>
             </>
           )}
+          {order.fileUrl && ["queued", "printing", "ready"].includes(order.printStatus) && (
+            <a href={order.fileUrl} target="_blank" rel="noreferrer" className="text-[13px] font-medium text-[#4F46E5] hover:underline">
+              📄 Open file
+            </a>
+          )}
           {order.printStatus !== "cancelled" && (
             <a
               href={`/api/orders/${order._id}/invoice`}
@@ -395,6 +415,50 @@ function OrderCard({
           )}
         </div>
       </div>
+
+      {order.printStatus === "failed" && (
+        <div className="mt-4 rounded-lg p-3.5" style={{ background: "rgba(244,63,94,0.08)" }}>
+          <div className="text-[13px] font-semibold" style={{ color: "#BE123C" }}>
+            Printing failed — choose what to do
+          </div>
+          <div className="mt-2.5 flex flex-wrap items-center gap-2">
+            <Button size="sm" onClick={() => onUpdate(order._id, { printStatus: "queued" })}>
+              🔁 Retry print
+            </Button>
+            {order.fileUrl && (
+              <a
+                href={order.fileUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center rounded-lg px-3 py-1 text-[13px] font-medium transition hover:brightness-95"
+                style={{ background: "rgba(79,70,229,0.16)", color: "#4F46E5" }}
+              >
+                🖨️ Open file &amp; print manually
+              </a>
+            )}
+            <Button variant="light" tone="success" size="sm" onClick={() => onUpdate(order._id, { printStatus: "ready" })}>
+              ✅ Printed manually — Mark Ready
+            </Button>
+            {printers.length > 0 && (
+              <select
+                defaultValue=""
+                onChange={(e) => e.target.value && onUpdate(order._id, { printerId: e.target.value, printStatus: "queued" })}
+                className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[13px] text-slate-900/80 outline-none transition hover:border-slate-500 focus:border-[#4F46E5] focus:ring-1 focus:ring-[#4F46E5]"
+              >
+                <option value="">Retry on another printer…</option>
+                {printers.map((p) => (
+                  <option key={p._id} value={p._id}>
+                    {p.name} ({p.status})
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          {!order.fileUrl && (
+            <div className="mt-2 text-xs text-slate-900/60">The file is no longer available — ask the customer to send it again.</div>
+          )}
+        </div>
+      )}
 
       {printers.length > 0 && order.printStatus === "queued" && (
         <div className="mt-4 flex items-center gap-2 border-t border-slate-900/10 pt-3">
