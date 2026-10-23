@@ -23,7 +23,6 @@ function isSupabaseConfigured(): boolean {
   const key = cleanEnv(process.env.SUPABASE_SERVICE_ROLE_KEY);
   return Boolean(url && key && !url.startsWith("your_") && !key.startsWith("your_"));
 }
-
 /**
  * Local-disk storage. Active when:
  *   - STORAGE_MODE=local (works in production too — for a shop that runs the app on its own PC/server), or
