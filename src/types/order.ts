@@ -35,6 +35,8 @@ export interface OrderDTO {
   printStatus: PrintStatus;
   printerId?: string;
   printerError?: string;
+  printAgentId?: string;
+  printedOn?: string;
 
   createdAt: string;
 }
@@ -61,6 +63,43 @@ export interface PricingConfigDTO {
   printingPaused: boolean;
 }
 
+/** One computer a printer is installed on, and how it is connected there. */
+export interface PrinterHostDTO {
+  agentId: string;
+  hostname: string;
+  username?: string;
+  manufacturer?: string;
+  model?: string;
+  port?: string;
+  portType?: string;
+  ipAddress?: string;
+  tcpPort?: number;
+  driver?: string;
+  status: "online" | "offline" | "paper_jam" | "low_ink" | "out_of_paper";
+  lastSeenAt?: string;
+}
+
+/** A computer running the Print Agent (GET /api/agents). */
+export interface AgentDTO {
+  agentId: string;
+  hostname: string;
+  username?: string;
+  manufacturer?: string;
+  model?: string;
+  os?: string;
+  appVersion?: string;
+  lastSeenAt: string;
+  online: boolean;
+  printers: {
+    printerId: string;
+    name: string;
+    port?: string;
+    ipAddress?: string;
+    tcpPort?: number;
+    status: PrinterHostDTO["status"];
+  }[];
+}
+
 export interface PrinterDTO {
   _id: string;
   name: string;
@@ -69,6 +108,7 @@ export interface PrinterDTO {
   supportedPaperSizes: PaperSize[];
   status: "online" | "offline" | "paper_jam" | "low_ink" | "out_of_paper";
   lastSeenAt?: string;
+  hosts?: PrinterHostDTO[];
   ordersPrintedToday: number;
   pagesPrintedToday?: number;
 }

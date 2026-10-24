@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 import { NextRequest, NextResponse } from "next/server";
 import { connectDB } from "@/lib/mongodb";
 import { Order } from "@/models/Order";
-import { deleteFile } from "@/lib/storage";
+import { purgeOrderFile } from "@/lib/fileCleanup";
 import { isRazorpayConfigured, refundRazorpayPayment } from "@/lib/razorpay";
 import { rateLimit, getClientIp } from "@/lib/rateLimit";
 import { CANCEL_WINDOW_MS } from "@/lib/orderTiming";
@@ -78,7 +78,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
 
     if (order.fileKey) {
-      deleteFile(order.fileKey).catch(() => {});
+      await purgeOrderFile(order);
     }
 
     return NextResponse.json({ order: cancelled, refundIssued });

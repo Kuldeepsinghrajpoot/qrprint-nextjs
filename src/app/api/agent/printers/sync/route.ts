@@ -2,26 +2,50 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { connectDB } from "@/lib/mongodb";
 import { Printer } from "@/models/Printer";
+import { Agent } from "@/models/Agent";
 import { verifyAgentKey } from "@/lib/agentAuth";
+import { aggregateStatus, HOST_STALE_MS } from "@/lib/printerHosts";
 
 export const runtime = "nodejs";
 
-/** Agent heartbeat is every ~20s; 2 minutes without any report = really offline. */
-const PRINTER_STALE_MS = 2 * 60 * 1000;
+const str = (max: number) => z.string().trim().max(max).optional();
 
 const schema = z.object({
-  printers: z.array(z.object({ name: z.string().trim().min(1).max(200) })).max(50),
+  // Which computer is reporting (new agents). Old agents omit this and keep the legacy behaviour.
+  agent: z
+    .object({
+      id: z.string().trim().min(8).max(100),
+      hostname: z.string().trim().max(100).default(""),
+      username: str(100),
+      manufacturer: str(100),
+      model: str(100),
+      os: str(100),
+      appVersion: str(30),
+    })
+    .optional(),
+  printers: z
+    .array(
+      z.object({
+        name: z.string().trim().min(1).max(200),
+        port: str(200),
+        portType: str(60),
+        ipAddress: str(100),
+        tcpPort: z.number().int().min(0).max(65535).optional(),
+        driver: str(200),
+      })
+    )
+    .max(50),
 });
 
 /**
  * POST /api/agent/printers/sync
- * The Print Agent reports every (real) printer installed on the shop PC.
- *  - New printers are created automatically (type "both", A4/Legal/Letter) —
- *    staff can then adjust type / loaded paper sizes on Admin → Printers.
- *  - Printers already known keep whatever staff configured; only their
- *    status/lastSeenAt are refreshed.
- *  - Printers no longer reported for 2+ minutes are marked offline (not deleted, so
- *    historic orders and staff settings are kept).
+ * The Print Agent reports every (real) printer installed on its computer, and which computer it is.
+ *  - New printers are created automatically (type "both", A4/Legal/Letter) — staff can then adjust type /
+ *    loaded paper sizes on Admin → Printers.
+ *  - Printers already known keep whatever staff configured.
+ *  - With `agent` info, each printer remembers every computer it is installed on (name, model, port, IP…),
+ *    so the dashboard can show which computer a printer belongs to when it's installed on several.
+ *  - A printer missing from a report is only marked offline when no computer has reported it for 2+ minutes.
  * Responds with the dashboard printers so the agent can map IDs automatically.
  */
 export async function POST(req: NextRequest) {
@@ -35,7 +59,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
     }
 
-    const names = Array.from(new Set(parsed.data.printers.map((p) => p.name)));
+    const { agent } = parsed.data;
+    const reported = new Map(parsed.data.printers.map((p) => [p.name, p]));
+    const names = Array.from(reported.keys());
     const now = new Date();
     await connectDB();
 
@@ -45,18 +71,16 @@ export async function POST(req: NextRequest) {
           updateOne: {
             filter: { shopId: "main", systemPrinterName: name },
             update: {
-              // Being INSTALLED on the PC is not the same as being ONLINE: the real status comes from the agent's
-              // heartbeat (PATCH /api/printers/:id/status). Sync only records that the agent is alive; setting
-              // "online" here overwrote the heartbeat's "offline" every few seconds and made printers flip.
-              $set: { lastSeenAt: now },
+              // With agent info the status is computed from the computers below; legacy agents set it directly.
+              $set: agent ? { lastSeenAt: now } : { status: "online", lastSeenAt: now },
               $setOnInsert: {
                 shopId: "main",
                 name,
                 systemPrinterName: name,
-                status: "offline", // until the first heartbeat reports the real state (seconds later)
                 type: "both",
                 supportedPaperSizes: ["A4", "Legal", "Letter"],
                 ordersPrintedToday: 0,
+                ...(agent ? { status: "online" } : {}),
               },
             },
             upsert: true,
@@ -65,10 +89,67 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (agent) {
+      await Agent.updateOne(
+        { shopId: "main", agentId: agent.id },
+        {
+          $set: {
+            hostname: agent.hostname,
+            username: agent.username,
+            manufacturer: agent.manufacturer,
+            model: agent.model,
+            os: agent.os,
+            appVersion: agent.appVersion,
+            lastSeenAt: now,
+          },
+          $setOnInsert: { shopId: "main", agentId: agent.id },
+        },
+        { upsert: true }
+      );
+
+      // Refresh this computer's entry on every printer it reported.
+      const docs = await Printer.find({ shopId: "main", systemPrinterName: { $in: names } });
+      for (const doc of docs) {
+        const p = reported.get(doc.systemPrinterName)!;
+        const existing = doc.hosts.find((h) => h.agentId === agent.id);
+        const host = {
+          agentId: agent.id,
+          hostname: agent.hostname,
+          username: agent.username,
+          manufacturer: agent.manufacturer,
+          model: agent.model,
+          port: p.port,
+          portType: p.portType,
+          ipAddress: p.ipAddress,
+          tcpPort: p.tcpPort || undefined,
+          driver: p.driver,
+          // keep the health the heartbeat last reported; a brand-new entry starts as online
+          status: existing?.status ?? "online",
+          lastSeenAt: now,
+        };
+        doc.hosts = [...doc.hosts.filter((h) => h.agentId !== agent.id), host];
+        const agg = aggregateStatus(doc.hosts, now);
+        doc.status = agg.status;
+        doc.lastSeenAt = agg.lastSeenAt ?? now;
+        await doc.save();
+      }
+
+      // Printers this computer no longer has: drop its entry and recompute.
+      const gone = await Printer.find({ shopId: "main", systemPrinterName: { $nin: names }, "hosts.agentId": agent.id });
+      for (const doc of gone) {
+        doc.hosts = doc.hosts.filter((h) => h.agentId !== agent.id);
+        doc.status = aggregateStatus(doc.hosts, now).status;
+        await doc.save();
+      }
+
+      // Forget computers that haven't reported for a week (retired PCs).
+      const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      await Printer.updateMany({ shopId: "main", "hosts.lastSeenAt": { $lt: weekAgo } }, { $pull: { hosts: { lastSeenAt: { $lt: weekAgo } } } });
+      await Agent.deleteMany({ shopId: "main", lastSeenAt: { $lt: weekAgo } });
+    }
+
     // A printer missing from THIS agent's list is only marked offline if nobody has reported it recently.
-    // Without this grace period, two agents (e.g. a test copy + the shop PC) or one flaky printer scan make
-    // the dashboard flip between online/offline every few seconds.
-    const staleBefore = new Date(now.getTime() - PRINTER_STALE_MS);
+    const staleBefore = new Date(now.getTime() - HOST_STALE_MS);
     await Printer.updateMany(
       {
         shopId: "main",
@@ -79,9 +160,7 @@ export async function POST(req: NextRequest) {
       { $set: { status: "offline" } }
     );
 
-    const printers = await Printer.find({ shopId: "main" })
-      .select("systemPrinterName type")
-      .lean();
+    const printers = await Printer.find({ shopId: "main" }).select("systemPrinterName type").lean();
     return NextResponse.json(
       printers.map((p) => ({ id: String(p._id), systemPrinterName: p.systemPrinterName, type: p.type }))
     );

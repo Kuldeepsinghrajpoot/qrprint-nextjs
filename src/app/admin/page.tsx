@@ -282,6 +282,25 @@ export default function AdminQueuePage() {
   );
 }
 
+/** "SHOP-PC-01 (Kulde), FRONT-DESK-PC" — the computer(s) a printer is installed on. */
+function computersLabel(p?: PrinterDTO): string {
+  return (p?.hosts ?? [])
+    .map((h) => (h.username ? `${h.hostname || "Unnamed computer"} (${h.username})` : h.hostname || "Unnamed computer"))
+    .join(", ");
+}
+
+/** "🖨️ HP LaserJet · 💻 SHOP-PC-01 (Kulde)" — where an order is printing / printed (or assigned to). */
+function orderWhere(order: OrderDTO, printers: PrinterDTO[]): string {
+  if (order.printAgentId) {
+    const host = printers.flatMap((p) => p.hosts ?? []).find((h) => h.agentId === order.printAgentId);
+    const pc = host ? (host.username ? `${host.hostname} (${host.username})` : host.hostname) : "";
+    return [order.printedOn && `🖨️ ${order.printedOn}`, pc && `💻 ${pc}`].filter(Boolean).join(" · ");
+  }
+  const assigned = printers.find((p) => p._id === order.printerId);
+  const pcs = computersLabel(assigned);
+  return assigned ? `🖨️ ${assigned.name}${pcs ? ` · 💻 ${pcs}` : ""}` : "";
+}
+
 /** "On hold" countdown: the customer can still cancel, so the order isn't sent to the printer yet. */
 function HoldChip({ createdAt }: { createdAt: string }) {
   const [, tick] = useState(0);
@@ -366,6 +385,7 @@ function OrderCard({
               {order.printStatus === "failed" && (
                 <Chip color="error">Failed{order.printerError ? `: ${order.printerError}` : ""}</Chip>
               )}
+              {orderWhere(order, printers) && <Chip color="secondary">{orderWhere(order, printers)}</Chip>}
               {needsPaperChange && <Chip color="warning">📄 Needs {order.paperSize} paper — won&apos;t auto-print</Chip>}
               {order.requiresManualPrint && order.printStatus === "queued" && (
                 <Chip color="purple">📎 Word/ZIP file — open &amp; print manually, then Mark Ready</Chip>
@@ -448,7 +468,7 @@ function OrderCard({
                 <option value="">Retry on another printer…</option>
                 {printers.map((p) => (
                   <option key={p._id} value={p._id}>
-                    {p.name} ({p.status})
+                    {p.name} ({p.status}){computersLabel(p) ? ` — ${computersLabel(p)}` : ""}
                   </option>
                 ))}
               </select>
@@ -471,7 +491,7 @@ function OrderCard({
             <option value="">Assign printer…</option>
             {printers.map((p) => (
               <option key={p._id} value={p._id}>
-                {p.name} ({p.status})
+                {p.name} ({p.status}){computersLabel(p) ? ` — ${computersLabel(p)}` : ""}
               </option>
             ))}
           </select>

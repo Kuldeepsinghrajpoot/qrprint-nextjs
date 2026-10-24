@@ -11,7 +11,11 @@ const schema = z.object({
   printStatus: z.enum(["printing", "ready", "failed"]),
   printerError: z.string().optional(),
   printerId: z.string().optional(),
+  // Which computer / printer is doing the job (shown in the Live Queue)
+  agentId: z.string().trim().max(100).optional(),
+  printedOn: z.string().trim().max(200).optional(),
 });
+
 
 /**
  * PATCH /api/agent/orders/:id/status
@@ -40,11 +44,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     await connectDB();
 
+    const { agentId, ...rest } = parsed.data;
+    const update = { ...rest, ...(agentId ? { printAgentId: agentId } : {}) };
+
     let order;
     if (parsed.data.printStatus === "printing") {
       // Atomic claim: only transition queued -> printing. If another agent
       // already claimed this order, findOneAndUpdate matches nothing here.
-      order = await Order.findOneAndUpdate({ _id: id, printStatus: "queued" }, parsed.data, { new: true });
+      order = await Order.findOneAndUpdate({ _id: id, printStatus: "queued" }, update, { new: true });
       if (!order) {
         const existing = await Order.findById(id);
         if (!existing) return NextResponse.json({ error: "Order not found" }, { status: 404 });
@@ -54,7 +61,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         );
       }
     } else {
-      order = await Order.findByIdAndUpdate(id, parsed.data, { new: true });
+      order = await Order.findByIdAndUpdate(id, update, { new: true });
       if (!order) return NextResponse.json({ error: "Order not found" }, { status: 404 });
     }
 

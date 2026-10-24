@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { connectDB } from "@/lib/mongodb";
 import { Order } from "@/models/Order";
-import { deleteFile } from "@/lib/storage";
+import { purgeOrderFile } from "@/lib/fileCleanup";
 import { getSession } from "@/lib/session";
 import { sendOrderNotification, readyMessage } from "@/lib/notify";
 
@@ -41,12 +41,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       return NextResponse.json({ error: "Order not found" }, { status: 404 });
     }
 
-    // Privacy feature: once collected, delete the stored file
+    // Privacy feature: once collected, delete the stored file (and clear its link from the order)
+    let fileDeleted: boolean | undefined;
     if (parsed.data.printStatus === "collected" && order.fileKey) {
-      try {
-        await deleteFile(order.fileKey);
-      } catch {
-        // Non-fatal — file may already be gone
+      const result = await purgeOrderFile(order);
+      fileDeleted = result.deleted;
+      if (result.deleted) {
+        order.fileKey = undefined;
+        order.fileUrl = undefined;
       }
     }
 
@@ -59,7 +61,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       }).catch(() => {});
     }
 
-    return NextResponse.json(order);
+    return NextResponse.json(fileDeleted === undefined ? order : { ...order.toObject(), fileDeleted });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to update order";
     return NextResponse.json({ error: message }, { status: 500 });

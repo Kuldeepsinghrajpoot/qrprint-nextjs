@@ -1,3 +1,4 @@
+import { sweepStaleFiles } from "@/lib/fileCleanup";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { connectDB } from "@/lib/mongodb";
@@ -59,6 +60,9 @@ export async function GET(req: NextRequest) {
     },
     { $set: { printStatus: "failed", printerError: "Auto-cancelled: cash payment not confirmed in time" } }
   );
+
+  // Safety net for the "delete the file once collected/cancelled" privacy feature (retries failed deletes).
+  await sweepStaleFiles().catch(() => {});
 
   const status = req.nextUrl.searchParams.get("printStatus");
   const filter: Record<string, unknown> = { shopId: "main" };

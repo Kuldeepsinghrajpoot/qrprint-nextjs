@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import type { PrinterDTO, PaperSize } from "@/types/order";
+import type { PrinterDTO, PrinterHostDTO, AgentDTO, PaperSize } from "@/types/order";
 import FluentIcon from "@/components/lexical/FluentIcon";
 import {
   Card,
+  CardHeader,
   Chip,
   Dialog,
   Field,
@@ -34,11 +35,25 @@ const TYPE_LABEL: Record<PrinterDTO["type"], string> = {
 
 const isAttention = (s: PrinterDTO["status"]) => s === "paper_jam" || s === "low_ink" || s === "out_of_paper";
 
+/** "USB001 (USB) · 192.168.1.20:9100" — the port a printer is connected through on one computer. */
+function portLabel(h: PrinterHostDTO): string {
+  const parts: string[] = [];
+  if (h.port) parts.push(h.portType && h.portType !== "Other" ? `${h.port} (${h.portType})` : h.port);
+  else if (h.portType) parts.push(h.portType);
+  if (h.ipAddress) parts.push(h.tcpPort ? `${h.ipAddress}:${h.tcpPort}` : h.ipAddress);
+  else if (h.tcpPort) parts.push(`port ${h.tcpPort}`);
+  return parts.join(" · ") || "—";
+}
+
+const computerModel = (c: { manufacturer?: string; model?: string }) =>
+  [c.manufacturer, c.model].filter(Boolean).join(" ") || "Model unknown";
+
 type Filter = "All" | "Online" | "Offline" | "Needs Attention";
 const FILTERS: Filter[] = ["All", "Online", "Offline", "Needs Attention"];
 
 export default function PrintersPage() {
   const [printers, setPrinters] = useState<PrinterDTO[]>([]);
+  const [agents, setAgents] = useState<AgentDTO[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [type, setType] = useState<"bw" | "color" | "both">("both");
@@ -51,8 +66,12 @@ export default function PrintersPage() {
   const [toRemove, setToRemove] = useState<PrinterDTO | null>(null);
 
   const load = useCallback(async () => {
-    const res = await fetch("/api/printers", { cache: "no-store" });
+    const [res, agentsRes] = await Promise.all([
+      fetch("/api/printers", { cache: "no-store" }),
+      fetch("/api/agents", { cache: "no-store" }),
+    ]);
     setPrinters(await res.json());
+    if (agentsRes.ok) setAgents(await agentsRes.json());
   }, []);
 
   useEffect(() => {
@@ -135,7 +154,10 @@ export default function PrintersPage() {
         (filter === "Online" && p.status === "online") ||
         (filter === "Offline" && p.status === "offline") ||
         (filter === "Needs Attention" && isAttention(p.status));
-      return matchesFilter && (!q || `${p.name} ${p.systemPrinterName}`.toLowerCase().includes(q));
+      return matchesFilter && (!q ||
+          `${p.name} ${p.systemPrinterName} ${(p.hosts ?? []).map((h) => `${h.hostname} ${h.model ?? ""} ${portLabel(h)}`).join(" ")}`
+            .toLowerCase()
+            .includes(q));
     });
   }, [printers, filter, search]);
 
@@ -216,6 +238,49 @@ export default function PrintersPage() {
         </div>
       </Card>
 
+      {/* Connected computers */}
+      {agents.length > 0 && (
+        <Card>
+          <CardHeader
+            icon={<span className="text-3xl leading-none">💻</span>}
+            title="Connected computers"
+            subtitle={`${agents.filter((a) => a.online).length} of ${agents.length} online — the Print Agent runs on these`}
+          />
+          <div className="grid grid-cols-1 gap-4 px-6 pb-6 md:grid-cols-2 xl:grid-cols-3">
+            {agents.map((a) => (
+              <div key={a.agentId} className="rounded-[10px] border border-slate-900/10 p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-[15px] font-bold text-slate-900/90">{a.hostname || "Unnamed computer"}</div>
+                    <div className="truncate text-xs text-slate-900/60">{computerModel(a)}</div>
+                    {a.username && <div className="truncate text-xs text-slate-900/60">User: {a.username}</div>}
+                    {a.os && <div className="truncate text-xs text-slate-900/40">{a.os}</div>}
+                  </div>
+                  <Chip color={a.online ? "success" : "secondary"}>{a.online ? "Online" : "Offline"}</Chip>
+                </div>
+                <div className="mt-1 text-[11px] text-slate-900/40">Last seen {new Date(a.lastSeenAt).toLocaleString()}</div>
+                <div className="mt-3 space-y-1.5">
+                  {a.printers.length === 0 && <div className="text-xs text-slate-900/50">No printers reported</div>}
+                  {a.printers.map((pr) => (
+                    <div key={pr.printerId} className="flex items-center justify-between gap-2 rounded-md bg-slate-900/[0.04] px-2.5 py-1.5">
+                      <div className="min-w-0">
+                        <div className="truncate text-[13px] font-semibold text-slate-900/90">{pr.name}</div>
+                        <div className="truncate text-[11px] text-slate-900/60">
+                          {portLabel({ ...pr, agentId: a.agentId, hostname: a.hostname })}
+                        </div>
+                      </div>
+                      <Chip color={STATUS[pr.status].color} small>
+                        {STATUS[pr.status].label}
+                      </Chip>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {/* Printer cards */}
       {printers.length === 0 ? (
         <Card>
@@ -281,6 +346,32 @@ export default function PrintersPage() {
                     <Field k="Orders today" v={p.ordersPrintedToday ?? 0} />
                     <Field k="Pages today" v={p.pagesPrintedToday ?? 0} />
                     <Field k="Last seen" v={p.lastSeenAt ? new Date(p.lastSeenAt).toLocaleString() : "—"} />
+                  </div>
+
+                  <div>
+                    <div className="mb-1.5 text-xs text-slate-900/60">
+                      Installed on {(p.hosts ?? []).length > 1 ? `${p.hosts!.length} computers` : "computer"}
+                    </div>
+                    {(p.hosts ?? []).length === 0 ? (
+                      <div className="text-xs text-slate-900/50">Not reported by any computer yet</div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {p.hosts!.map((h) => (
+                          <div key={h.agentId} className="rounded-lg bg-slate-900/[0.04] px-3 py-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="truncate text-[13px] font-semibold text-slate-900/90">💻 {h.hostname || "Unnamed computer"}</span>
+                              <Chip color={STATUS[h.status].color} small>
+                                {STATUS[h.status].label}
+                              </Chip>
+                            </div>
+                            <div className="truncate text-xs text-slate-900/60">{computerModel(h)}{h.username ? ` · User: ${h.username}` : ""}</div>
+                            <div className="truncate text-xs text-slate-900/60">
+                              Port: <span className="font-medium text-slate-900/80">{portLabel(h)}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <div>

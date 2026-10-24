@@ -41,6 +41,8 @@ export interface IOrder extends Document {
   printStatus: PrintStatus;
   printerId?: mongoose.Types.ObjectId;
   printerError?: string;
+  printAgentId?: string; // computer (Print Agent) that printed / is printing this order
+  printedOn?: string; // Windows printer name it was sent to
   razorpayPaymentId?: string;
   cancelledAt?: Date;
 
@@ -86,6 +88,8 @@ const OrderSchema = new Schema<IOrder>(
     },
     printerId: { type: Schema.Types.ObjectId, ref: "Printer" },
     printerError: { type: String },
+    printAgentId: { type: String },
+    printedOn: { type: String },
     razorpayPaymentId: { type: String, unique: true, sparse: true },
     cancelledAt: { type: Date },
   },

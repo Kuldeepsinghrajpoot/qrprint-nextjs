@@ -3,11 +3,14 @@ import { z } from "zod";
 import { connectDB } from "@/lib/mongodb";
 import { Printer } from "@/models/Printer";
 import { verifyAgentKey } from "@/lib/agentAuth";
+import { aggregateStatus } from "@/lib/printerHosts";
 
 export const runtime = "nodejs";
 
 const schema = z.object({
   status: z.enum(["online", "offline", "paper_jam", "low_ink", "out_of_paper"]),
+  // Which computer is reporting (new agents). Lets one printer installed on several computers keep a status per computer.
+  agentId: z.string().trim().min(8).max(100).optional(),
 });
 
 /**
@@ -30,12 +33,25 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
 
     await connectDB();
-    const printer = await Printer.findByIdAndUpdate(
-      id,
-      { status: parsed.data.status, lastSeenAt: new Date() },
-      { new: true }
-    );
+    const { status, agentId } = parsed.data;
+    const now = new Date();
+
+    const printer = await Printer.findById(id);
     if (!printer) return NextResponse.json({ error: "Printer not found" }, { status: 404 });
+
+    const host = agentId ? printer.hosts.find((h) => h.agentId === agentId) : undefined;
+    if (host) {
+      // Per-computer status; the printer's overall status is derived from all its computers.
+      host.status = status;
+      host.lastSeenAt = now;
+      const agg = aggregateStatus(printer.hosts, now);
+      printer.status = agg.status;
+      printer.lastSeenAt = agg.lastSeenAt ?? now;
+    } else {
+      printer.status = status;
+      printer.lastSeenAt = now;
+    }
+    await printer.save();
 
     return NextResponse.json(printer);
   } catch (err) {

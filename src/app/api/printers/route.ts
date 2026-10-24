@@ -4,6 +4,7 @@ import { connectDB } from "@/lib/mongodb";
 import { Printer } from "@/models/Printer";
 import { Order } from "@/models/Order";
 import { getSession } from "@/lib/session";
+import { aggregateStatus, isFresh } from "@/lib/printerHosts";
 
 export const runtime = "nodejs";
 
@@ -50,11 +51,20 @@ export async function GET() {
   return NextResponse.json(
     printers.map((pr) => {
       const s = byPrinter.get(String(pr._id));
-      // If the Print Agent has gone silent (PC off / agent closed), "online" is stale — show offline.
+      const obj = pr.toObject();
+      // Per-computer view: a computer that stopped reporting is shown offline.
+      const hosts = (obj.hosts ?? []).map((h) => ({
+        ...h,
+        status: isFresh(h, now) ? h.status : "offline",
+      }));
+      // With computer info the status is derived from all of them; otherwise (legacy / manual printer)
+      // "online" that nobody has refreshed for 2 minutes means the agent went silent.
       const silent = pr.status === "online" && pr.lastSeenAt && now.getTime() - new Date(pr.lastSeenAt).getTime() > 2 * 60 * 1000;
+      const status = hosts.length ? aggregateStatus(obj.hosts, now).status : silent ? "offline" : pr.status;
       return {
-        ...pr.toObject(),
-        ...(silent ? { status: "offline" } : {}),
+        ...obj,
+        hosts,
+        status,
         ordersPrintedToday: s?.orders ?? 0,
         pagesPrintedToday: s?.pages ?? 0,
       };
